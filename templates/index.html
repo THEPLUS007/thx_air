@@ -1,0 +1,552 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI 여행 플래너 챗봇</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+
+        .container {
+            display: flex;
+            width: 90%;
+            max-width: 1400px;
+            height: 90vh;
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+            overflow: hidden;
+        }
+
+        /* 디스플레이 제어 */
+        .desktop-only {
+            display: block;
+        }
+
+        .mobile-only {
+            display: none;
+        }
+
+        @media (max-width: 1024px) {
+            .desktop-only {
+                display: none !important;
+            }
+
+            .mobile-only {
+                display: block !important;
+            }
+        }
+
+        @media (max-width: 768px) {
+            .container {
+                width: 95%;
+                height: auto;
+                min-height: 100vh;
+            }
+
+            .left-panel, .right-panel {
+                height: auto;
+                min-height: 40vh;
+                padding: 20px;
+            }
+
+            .chat-messages {
+                max-height: 300px;
+            }
+
+            .input-section {
+                flex-direction: column;
+            }
+
+            .input-group {
+                margin-bottom: 15px;
+            }
+
+            button {
+                width: 100%;
+                padding: 15px;
+            }
+        }
+
+        .left-panel {
+            flex: 1;
+            padding: 30px;
+            border-right: 1px solid #e0e0e0;
+            background: #f8f9fa;
+        }
+
+        .right-panel {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            padding: 30px;
+        }
+
+        h1 {
+            color: #333;
+            margin-bottom: 20px;
+            text-align: center;
+        }
+
+        .output-section {
+            height: 100%;
+            overflow-y: auto;
+        }
+
+        .output-content {
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            white-space: pre-wrap;
+            font-family: 'Courier New', monospace;
+            font-size: 14px;
+            line-height: 1.5;
+        }
+
+        .chat-section {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            margin-bottom: 20px;
+        }
+
+        .chat-messages {
+            flex: 1;
+            overflow-y: auto;
+            background: #f8f9fa;
+            border-radius: 10px;
+            padding: 20px;
+            margin-bottom: 20px;
+            max-height: 400px;
+        }
+
+        .message {
+            margin-bottom: 15px;
+            padding: 10px 15px;
+            border-radius: 10px;
+            max-width: 80%;
+        }
+
+        .message.user {
+            background: #007bff;
+            color: white;
+            margin-left: auto;
+            text-align: right;
+        }
+
+        .message.bot {
+            background: #e9ecef;
+            color: #333;
+        }
+
+        .input-section {
+            display: flex;
+            gap: 10px;
+        }
+
+        .input-group {
+            flex: 1;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: 500;
+            color: #555;
+        }
+
+        input, textarea {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            font-size: 14px;
+        }
+
+        textarea {
+            resize: vertical;
+            min-height: 60px;
+        }
+
+        button {
+            padding: 10px 20px;
+            background: #28a745;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: background 0.3s;
+        }
+
+        button:hover {
+            background: #218838;
+        }
+
+        button:disabled {
+            background: #6c757d;
+            cursor: not-allowed;
+        }
+
+        .loading {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #3498db;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .status {
+            text-align: center;
+            margin-top: 10px;
+            font-size: 12px;
+            color: #666;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- 데스크톱 레이아웃 -->
+        <div class="left-panel desktop-only">
+            <h1>📄 여행 계획 결과</h1>
+            <div class="output-section">
+                <div id="output-content" class="output-content">
+                    여행 계획이 아직 생성되지 않았습니다.
+                </div>
+            </div>
+        </div>
+
+        <div class="right-panel desktop-only">
+            <h1>🤖 AI 여행 플래너</h1>
+
+            <div class="chat-section">
+                <div id="chat-messages" class="chat-messages">
+                    <div class="message bot">
+                        안녕하세요! 여행 계획을 도와드릴게요. 아래에 여행 정보를 입력해주세요.
+                    </div>
+                </div>
+            </div>
+
+            <div class="input-section">
+                <div class="input-group">
+                    <label for="query">여행 쿼리:</label>
+                    <textarea id="query" placeholder="예: 일본 도쿄 3일 부모님과 가성비 힐링 여행"></textarea>
+                </div>
+
+                <div class="input-group">
+                    <label for="budget">예산 (선택사항):</label>
+                    <input type="text" id="budget" placeholder="예: 인당 100만원">
+                </div>
+
+                <div class="input-group">
+                    <label for="people">인원 (선택사항):</label>
+                    <input type="number" id="people" placeholder="예: 2" min="1">
+                </div>
+
+                <button id="submit-btn" onclick="submitQuery()">
+                    <span id="btn-text">전송</span>
+                    <span id="loading" class="loading" style="display: none;"></span>
+                </button>
+            </div>
+
+            <div id="status" class="status"></div>
+        </div>
+
+        <!-- 태블릿/모바일 탭 레이아웃 -->
+        <div class="tab-container mobile-only">
+            <button class="tab-button active" onclick="switchTab('chat')">챗봇</button>
+            <button class="tab-button" onclick="switchTab('output')">결과</button>
+        </div>
+
+        <div id="chat-tab" class="tab-content active mobile-only">
+            <h1>🤖 AI 여행 플래너</h1>
+
+            <div class="chat-section">
+                <div id="chat-messages-mobile" class="chat-messages">
+                    <div class="message bot">
+                        안녕하세요! 여행 계획을 도와드릴게요. 아래에 여행 정보를 입력해주세요.
+                    </div>
+                </div>
+            </div>
+
+            <div class="input-section">
+                <div class="input-group">
+                    <label for="query-mobile">여행 쿼리:</label>
+                    <textarea id="query-mobile" placeholder="예: 일본 도쿄 3일 부모님과 가성비 힐링 여행"></textarea>
+                </div>
+
+                <div class="input-group">
+                    <label for="budget-mobile">예산 (선택사항):</label>
+                    <input type="text" id="budget-mobile" placeholder="예: 인당 100만원">
+                </div>
+
+                <div class="input-group">
+                    <label for="people-mobile">인원 (선택사항):</label>
+                    <input type="number" id="people-mobile" placeholder="예: 2" min="1">
+                </div>
+
+                <button id="submit-btn-mobile" onclick="submitQueryMobile()">
+                    <span id="btn-text-mobile">전송</span>
+                    <span id="loading-mobile" class="loading" style="display: none;"></span>
+                </button>
+            </div>
+
+            <div id="status-mobile" class="status"></div>
+        </div>
+
+        <div id="output-tab" class="tab-content mobile-only">
+            <h1>📄 여행 계획 결과</h1>
+            <div class="output-section">
+                <div id="output-content-mobile" class="output-content">
+                    여행 계획이 아직 생성되지 않았습니다.
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        async function loadOutput() {
+            try {
+                const response = await fetch('/get_output');
+                const data = await response.json();
+                document.getElementById('output-content').textContent = data.content;
+            } catch (error) {
+                console.error('Failed to load output:', error);
+            }
+        }
+
+        async function submitQuery() {
+            const query = document.getElementById('query').value.trim();
+            const budget = document.getElementById('budget').value.trim();
+            const people = document.getElementById('people').value;
+
+            if (!query) {
+                alert('여행 쿼리를 입력해주세요!');
+                return;
+            }
+
+            // UI 업데이트
+            const btn = document.getElementById('submit-btn');
+            const btnText = document.getElementById('btn-text');
+            const loading = document.getElementById('loading');
+            const status = document.getElementById('status');
+
+            btn.disabled = true;
+            btnText.style.display = 'none';
+            loading.style.display = 'inline-block';
+            status.textContent = '여행 계획을 생성하는 중...';
+
+            // 채팅 메시지 추가
+            addMessage('user', `쿼리: ${query}${budget ? `, 예산: ${budget}` : ''}${people ? `, 인원: ${people}` : ''}`);
+
+            try {
+                const response = await fetch('/plan_trip', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        query: query,
+                        budget: budget || undefined,
+                        people: people ? parseInt(people) : undefined
+                    })
+                });
+
+                let data;
+                try {
+                    const responseText = await response.text();
+                    if (!responseText.trim()) {
+                        throw new Error('서버에서 빈 응답을 받았습니다');
+                    }
+                    data = JSON.parse(responseText);
+                } catch (parseError) {
+                    console.error('JSON 파싱 오류:', parseError);
+                    throw new Error(`서버 응답 파싱 실패: ${response.status} ${response.statusText}`);
+                }
+
+                if (response.ok) {
+                    addMessage('bot', '✅ 여행 계획이 성공적으로 생성되었습니다!');
+                    // 출력 내용 새로고침
+                    setTimeout(loadOutput, 1000);
+                } else {
+                    addMessage('bot', `❌ 오류: ${data.detail || '알 수 없는 서버 오류'}`);
+                }
+            } catch (error) {
+                console.error('네트워크 오류:', error);
+                addMessage('bot', `❌ 네트워크 오류: ${error.message}`);
+            } finally {
+                btn.disabled = false;
+                btnText.style.display = 'inline';
+                loading.style.display = 'none';
+                status.textContent = '';
+
+                // 입력 필드 초기화
+                document.getElementById('query').value = '';
+                document.getElementById('budget').value = '';
+                document.getElementById('people').value = '';
+            }
+        }
+
+        function addMessage(type, content) {
+            const messages = document.getElementById('chat-messages');
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `message ${type}`;
+            messageDiv.textContent = content;
+            messages.appendChild(messageDiv);
+            messages.scrollTop = messages.scrollHeight;
+        }
+
+        // 탭 전환 기능
+        function switchTab(tabName) {
+            // 탭 버튼 활성화
+            document.querySelectorAll('.tab-button').forEach(btn => {
+                btn.classList.remove('active');
+            });
+            event.target.classList.add('active');
+
+            // 탭 내용 전환
+            document.querySelectorAll('.tab-content').forEach(content => {
+                content.classList.remove('active');
+            });
+            document.getElementById(tabName + '-tab').classList.add('active');
+        }
+
+        async function submitQueryMobile() {
+            const query = document.getElementById('query-mobile').value.trim();
+            const budget = document.getElementById('budget-mobile').value.trim();
+            const people = document.getElementById('people-mobile').value;
+
+            if (!query) {
+                alert('여행 쿼리를 입력해주세요!');
+                return;
+            }
+
+            // UI 업데이트
+            const btn = document.getElementById('submit-btn-mobile');
+            const btnText = document.getElementById('btn-text-mobile');
+            const loading = document.getElementById('loading-mobile');
+            const status = document.getElementById('status-mobile');
+
+            btn.disabled = true;
+            btnText.style.display = 'none';
+            loading.style.display = 'inline-block';
+            status.textContent = '여행 계획을 생성하는 중...';
+
+            // 채팅 메시지 추가
+            addMessageMobile('user', `쿼리: ${query}${budget ? `, 예산: ${budget}` : ''}${people ? `, 인원: ${people}` : ''}`);
+
+            try {
+                const response = await fetch('/plan_trip', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        query: query,
+                        budget: budget || undefined,
+                        people: people ? parseInt(people) : undefined
+                    })
+                });
+
+                let data;
+                try {
+                    const responseText = await response.text();
+                    if (!responseText.trim()) {
+                        throw new Error('서버에서 빈 응답을 받았습니다');
+                    }
+                    data = JSON.parse(responseText);
+                } catch (parseError) {
+                    console.error('JSON 파싱 오류:', parseError);
+                    throw new Error(`서버 응답 파싱 실패: ${response.status} ${response.statusText}`);
+                }
+
+                if (response.ok) {
+                    addMessageMobile('bot', '✅ 여행 계획이 성공적으로 생성되었습니다!');
+                    // 출력 내용 새로고침
+                    setTimeout(() => {
+                        loadOutput();
+                        loadOutputMobile();
+                    }, 1000);
+                } else {
+                    addMessageMobile('bot', `❌ 오류: ${data.detail || '알 수 없는 서버 오류'}`);
+                }
+            } catch (error) {
+                console.error('네트워크 오류:', error);
+                addMessageMobile('bot', `❌ 네트워크 오류: ${error.message}`);
+            } finally {
+                btn.disabled = false;
+                btnText.style.display = 'inline';
+                loading.style.display = 'none';
+                status.textContent = '';
+
+                // 입력 필드 초기화
+                document.getElementById('query-mobile').value = '';
+                document.getElementById('budget-mobile').value = '';
+                document.getElementById('people-mobile').value = '';
+            }
+        }
+
+        async function loadOutputMobile() {
+            try {
+                const response = await fetch('/get_output');
+                const data = await response.json();
+                document.getElementById('output-content-mobile').textContent = data.content;
+            } catch (error) {
+                console.error('Failed to load output:', error);
+            }
+        }
+
+        function addMessageMobile(type, content) {
+            const messages = document.getElementById('chat-messages-mobile');
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `message ${type}`;
+            messageDiv.textContent = content;
+            messages.appendChild(messageDiv);
+            messages.scrollTop = messages.scrollHeight;
+        }
+
+        // 엔터키로 전송
+        document.getElementById('query').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                submitQuery();
+            }
+        });
+
+        // 모바일용 엔터키 이벤트
+        document.getElementById('query-mobile').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                submitQueryMobile();
+            }
+        });
+
+        // 페이지 로드 시 출력 내용 불러오기
+        window.onload = function() {
+            loadOutput();
+            loadOutputMobile();
+        };
+    </script>
+</body>
+</html>

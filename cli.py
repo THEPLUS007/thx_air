@@ -16,7 +16,18 @@ def main():
     
     # 사용자 입력
     query = input("\n📝 여행 계획에 대해 물어봐주세요 (예: '일본 도쿄 5일, 미식 투어'): ").strip()
-    
+    budget = input("💰 예산이 있다면 입력해주세요 (예: 인당 100만원, 200000엔): ").strip() or None
+    people_raw = input("👥 몇 명이 여행하나요? (숫자만 입력, 예: 2): ").strip()
+    people = None
+    if people_raw:
+        try:
+            people = int(people_raw)
+            if people <= 0:
+                raise ValueError
+        except ValueError:
+            print("❌ people은 1 이상의 숫자여야 합니다.")
+            return
+
     if not query:
         print("❌ 질문을 입력해주세요!")
         return
@@ -27,6 +38,10 @@ def main():
         # 1단계: Planner
         print("[1/4] 📋 여행 정보 추출 중...")
         json_data = planner(query)
+        if budget:
+            json_data['budget'] = budget
+        if people is not None:
+            json_data['people'] = people
         print(f"✅ 추출 완료: {json_data}\n")
         
         # 2단계: Structurer (English)
@@ -57,6 +72,10 @@ def main():
         print(f"📍 목적지: {json_data.get('destination', 'N/A')}")
         print(f"⏰ 기간: {json_data.get('duration', 'N/A')}")
         print(f"❤️  취향: {json_data.get('preferences', 'N/A')}")
+        if budget:
+            print(f"💰 예산: {budget}")
+        if people is not None:
+            print(f"👥 인원: {people}명")
         print("\n✅ 파일이 저장되었습니다!\n")
         
     except Exception as e:
