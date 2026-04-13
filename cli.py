@@ -6,7 +6,7 @@ CLI 인터페이스: 터미널에서 여행 계획 생성
 import sys
 sys.path.insert(0, '/workspaces/thx_air')
 
-from main import planner, structurer, translate_to_korean, visualizer
+from main import planner, structurer, visualizer, detect_language
 import json
 
 def main():
@@ -36,7 +36,7 @@ def main():
     
     try:
         # 1단계: Planner
-        print("[1/4] 📋 여행 정보 추출 중...")
+        print("[1/3] 📋 여행 정보 추출 중...")
         json_data = planner(query)
         if budget:
             json_data['budget'] = budget
@@ -44,18 +44,15 @@ def main():
             json_data['people'] = people
         print(f"✅ 추출 완료: {json_data}\n")
         
-        # 2단계: Structurer (English)
-        print("[2/4] 📝 English travel guide 생성 중...")
-        english_content = structurer(json_data)
-        print("✅ English guide 생성 완료\n")
+        # 2단계: 언어 감지 및 Structurer
+        print("[2/3] 📝 여행 가이드 생성 중...")
+        language = detect_language(query)
+        print(f"감지된 언어: {language}")
+        markdown_content = structurer(json_data, language)
+        print("✅ 가이드 생성 완료\n")
         
-        # 3단계: 한국어 번역
-        print("[3/4] 🌐 한국어 번역 중...")
-        markdown_content = translate_to_korean(english_content)
-        print("✅ 한국어 번역 완료\n")
-        
-        # 4단계: Visualizer
-        print("[4/4] 🗺️ 이동 경로 생성 중...")
+        # 3단계: Visualizer
+        print("[3/3] 🗺️ 이동 경로 생성 중...")
         mermaid_code = visualizer(json_data)
         print("✅ 경로 생성 완료\n")
         
@@ -76,6 +73,7 @@ def main():
             print(f"💰 예산: {budget}")
         if people is not None:
             print(f"👥 인원: {people}명")
+        print(f"🌐 언어: {language}")
         print("\n✅ 파일이 저장되었습니다!\n")
         
     except Exception as e:

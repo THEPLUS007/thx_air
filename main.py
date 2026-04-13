@@ -1,6 +1,5 @@
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse
-from fastapi.templating import Jinja2Templates
+from fastapi.responses import StreamingResponse
+import io
 from pydantic import BaseModel
 import google.generativeai as genai
 import os
@@ -28,6 +27,9 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # Sentence Transformer for embeddings
 embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
+
+# Gemma 4 모델 글로벌 초기화
+gemma_model = genai.GenerativeModel("gemma-4-31b-it")
 
 app = FastAPI(
     title="AI 여행 플래너",
@@ -82,21 +84,11 @@ def extract_json_from_text(result_text: str) -> dict:
         return json.loads(cleaned)
 
 
-def normalize_data(data: Dict[str, Any]) -> Dict[str, Any]:
-    mapping = {
-        'cost': 'estimated_budget',
-        'price': 'estimated_budget',
-        'money': 'estimated_budget',
-        'budget': 'estimated_budget',
-        'location': 'visit_point',
-        'place': 'visit_point',
-        'spot': 'visit_point'
-    }
-    normalized: Dict[str, Any] = {}
-    for key, value in data.items():
-        normalized_key = mapping.get(key.lower(), key)
-        normalized[normalized_key] = value
-    return normalized
+def detect_language(query: str) -> str:
+    """쿼리에서 언어 감지: 한국어 문자가 있으면 'ko', 아니면 'en'"""
+    if re.search(r'[가-힣]', query):
+        return 'ko'
+    return 'en'
 
 
 def generate_embedding(text: str) -> List[float]:
@@ -106,12 +98,14 @@ def generate_embedding(text: str) -> List[float]:
 def process_pipeline(query: str) -> Dict[str, Any]:
     raw_data = planner(query)
     normalized_data = normalize_data(raw_data)
+    language = detect_language(query)
     text_for_embedding = f"{normalized_data.get('destination', '')} {normalized_data.get('preferences', '')} {json.dumps(normalized_data, ensure_ascii=False)}"
     embedding = generate_embedding(text_for_embedding)
     return {
         'normalized_data': normalized_data,
         'embedding': embedding,
-        'text_for_embedding': text_for_embedding
+        'text_for_embedding': text_for_embedding,
+        'language': language
     }
 
 
@@ -133,8 +127,7 @@ def planner(query: str) -> dict:
 - 가능한 한 구체적으로 추론하여 채우기
 - 응답은 오직 JSON 객체 하나뿐이어야 함"""
     try:
-        model = genai.GenerativeModel("gemma-4-31b-it")
-        response = model.generate_content(
+        response = gemma_model.generate_content(
             prompt,
             generation_config=genai.types.GenerationConfig(
                 temperature=0.1,
@@ -150,8 +143,38 @@ def planner(query: str) -> dict:
         raise Exception(f"Planner error: {str(e)}")
 
 
-def structurer(data: Dict[str, Any]) -> str:
-    prompt = f"""You are an AI that writes detailed travel guides in English. Use the travel information below to create a complete Obsidian-style Markdown guide.
+def structurer(data: Dict[str, Any], language: str = 'en') -> str:
+    if language == 'ko':
+        prompt = f"""당신은 한국 사용자의 여행 계획을 작성하는 AI입니다. 다음 여행 정보를 바탕으로 한국어로 상세한 여행 가이드를 작성하세요.
+
+여행 정보:
+- 목적지: {data.get('destination', 'N/A')}
+- 기간: {data.get('duration', 'N/A')}
+- 취향: {data.get('preferences', 'N/A')}
+- 추천 활동: {', '.join(data.get('activities', []))}
+- 태그: {', '.join(data.get('tags', []))}
+- 예산: {data.get('budget', 'N/A')}
+- 인원: {data.get('people', '1')}
+
+한국어로 상세한 여행 가이드를 작성하세요. YAML frontmatter를 포함하고, 마크다운 형식으로 작성하세요.
+
+---
+destination: {data.get('destination', 'N/A')}
+duration: {data.get('duration', 'N/A')}
+preferences: {data.get('preferences', 'N/A')}
+budget: {data.get('budget', 'N/A')}
+people: {data.get('people', '1')}
+tags: [{', '.join(data.get('tags', []))}]
+---
+
+## 목적지 소개
+## 추천 일정
+## 숙박 추천
+## 예산 안내
+## 팁
+"""
+    else:
+        prompt = f"""You are an AI that writes detailed travel guides in English. Use the travel information below to create a complete Obsidian-style Markdown guide.
 
 Travel information:
 - Destination: {data.get('destination', 'N/A')}
@@ -180,10 +203,10 @@ tags: [{', '.join(data.get('tags', []))}]
 ---
 
 Write the guide in English only."""
+    
     try:
-        model = genai.GenerativeModel("gemma-4-31b-it")
         for attempt in range(2):
-            response = model.generate_content(
+            response = gemma_model.generate_content(
                 prompt,
                 generation_config=genai.types.GenerationConfig(
                     temperature=0.3,
@@ -252,37 +275,6 @@ def visualizer(data: Dict[str, Any]) -> str:
     return mermaid_code
 
 
-def translate_to_korean(english_markdown: str) -> str:
-    prompt = f"""Translate the following English Markdown document into Korean.
-- Keep YAML frontmatter structure intact, but translate all text values into Korean.
-- Preserve Markdown headings, lists, and formatting.
-- Do not translate the contents of code blocks, especially Mermaid code blocks. Keep them as-is.
-- Output only the translated Markdown document.
-
-English Markdown:
-```markdown
-{english_markdown}
-```
-"""
-    try:
-        model = genai.GenerativeModel("gemma-4-31b-it")
-        for attempt in range(2):
-            response = model.generate_content(
-                prompt,
-                generation_config=genai.types.GenerationConfig(
-                    temperature=0.1,
-                    max_output_tokens=3000,
-                ),
-                request_options={"timeout": 120}
-            )
-            result_text = get_response_text(response)
-            if result_text:
-                return result_text
-        raise Exception("Translation response is empty")
-    except Exception as e:
-        raise Exception(f"Translation error: {str(e)}")
-
-
 @app.post("/create_plan")
 async def create_plan(request: CreatePlanRequest):
     try:
@@ -290,7 +282,11 @@ async def create_plan(request: CreatePlanRequest):
         data_to_insert = {
             'user_id': request.user_id,
             'destination': pipeline_result['normalized_data'].get('destination', ''),
-            'metadata': pipeline_result['normalized_data'],
+            'metadata': {
+                **pipeline_result['normalized_data'],
+                'lang_code': pipeline_result['language'],
+                'content': None  # 나중에 생성된 콘텐츠 저장 가능
+            },
             'embedding': pipeline_result['embedding']
         }
         response = supabase.table('travel_plans').insert(data_to_insert).execute()
@@ -313,6 +309,7 @@ async def update_plan(request: UpdatePlanRequest):
         existing_data = existing.data[0].get('metadata', {}) or {}
         pipeline_result = await asyncio.to_thread(process_pipeline, request.query)
         merged_data = {**existing_data, **pipeline_result['normalized_data']}
+        merged_data['lang_code'] = pipeline_result['language']
 
         text_for_embedding = json.dumps(merged_data, ensure_ascii=False)
         embedding = await asyncio.to_thread(generate_embedding, text_for_embedding)
@@ -341,27 +338,50 @@ async def plan_trip(trip_query: TripQuery):
         raise HTTPException(status_code=400, detail="people 값은 1 이상이어야 합니다")
 
     try:
+        # 1. Planner 호출
         json_data = await asyncio.to_thread(planner, trip_query.query)
         if trip_query.budget:
             json_data['budget'] = trip_query.budget
         if trip_query.people is not None:
             json_data['people'] = trip_query.people
 
-        english_content = await asyncio.to_thread(structurer, json_data)
-        korean_content = await asyncio.to_thread(translate_to_korean, english_content)
-        mermaid_code = await asyncio.to_thread(visualizer, json_data)
+        # 2. 언어 감지
+        language = detect_language(trip_query.query)
 
-        content = f"{korean_content}\n\n## 이동 경로\n\n```mermaid\n{mermaid_code}\n```\n"
+        # 3. 병렬 처리: structurer와 visualizer 동시에 실행
+        async def run_structurer():
+            try:
+                return await asyncio.to_thread(structurer, json_data, language)
+            except Exception as e:
+                return f"Error in structurer: {str(e)}"
+
+        async def run_visualizer():
+            try:
+                return await asyncio.to_thread(visualizer, json_data)
+            except Exception as e:
+                return f"Error in visualizer: {str(e)}"
+
+        content_task, mermaid_task = await asyncio.gather(run_structurer(), run_visualizer())
+
+        # 4. 결과 조합
+        final_content = f"{content_task}\n\n## 이동 경로\n\n```mermaid\n{mermaid_task}\n```\n"
+
+        # 5. 파일 저장 (충돌 방지 위해 임시 파일 사용)
+        import uuid
+        temp_filename = f"output_travel_{uuid.uuid4().hex}.md"
         def write_file():
-            with open("output_travel.md", "w", encoding="utf-8") as f:
-                f.write(content)
+            with open(temp_filename, "w", encoding="utf-8") as f:
+                f.write(final_content)
+            # 기존 파일 교체
+            import shutil
+            shutil.move(temp_filename, "output_travel.md")
         await asyncio.to_thread(write_file)
 
         return {
             "message": "Gemma 4가 여행 계획을 성공적으로 생성했습니다.",
-            "english": english_content,
-            "korean": korean_content,
-            "mermaid": mermaid_code
+            "content": final_content,
+            "language": language,
+            "mermaid": mermaid_task
         }
     except Exception as e:
         error_msg = str(e)
