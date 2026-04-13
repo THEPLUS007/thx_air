@@ -1,5 +1,6 @@
-from fastapi.responses import StreamingResponse
-import io
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 import google.generativeai as genai
 import os
@@ -8,7 +9,13 @@ import json
 import re
 from typing import Any, Dict, List, Optional
 import asyncio
-from supabase import create_client, Client
+try:
+    from supabase import create_client, Client
+    SUPABASE_AVAILABLE = True
+except ImportError:
+    SUPABASE_AVAILABLE = False
+    Client = None
+    create_client = None
 from sentence_transformers import SentenceTransformer
 
 # 환경 변수 로드
@@ -19,11 +26,21 @@ load_dotenv()
 genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
 
 # Supabase 클라이언트 설정
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-if not SUPABASE_URL or not SUPABASE_KEY:
-    raise RuntimeError("SUPABASE_URL 및 SUPABASE_KEY가 .env에 설정되어 있어야 합니다.")
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+if SUPABASE_AVAILABLE:
+    SUPABASE_URL = os.getenv("SUPABASE_URL")
+    SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        print("경고: SUPABASE_URL 및 SUPABASE_KEY가 설정되지 않았습니다. DB 기능이 비활성화됩니다.")
+        supabase = None
+    else:
+        try:
+            supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+        except Exception as e:
+            print(f"경고: Supabase 연결 실패: {e}. DB 기능이 비활성화됩니다.")
+            supabase = None
+else:
+    print("경고: Supabase 라이브러리를 불러올 수 없습니다. DB 기능이 비활성화됩니다.")
+    supabase = None
 
 # Sentence Transformer for embeddings
 embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
@@ -82,6 +99,26 @@ def extract_json_from_text(result_text: str) -> dict:
         cleaned = re.sub(r',\s*}', '}', cleaned)
         cleaned = re.sub(r',\s*\]', ']', cleaned)
         return json.loads(cleaned)
+
+
+def extract_code_block(text: str, block_type: str = None) -> str:
+    """마크다운 코드 블록 추출 (Mermaid, Python 등)"""
+    if not text:
+        return ""
+    
+    text = text.strip()
+    
+    if block_type and f'```{block_type}' in text:
+        match = re.search(rf'```{block_type}\s*(.*?)\s*```', text, re.DOTALL)
+        if match:
+            return match.group(1).strip()
+    
+    if '```' in text:
+        match = re.search(r'```\s*([a-z]*)\s*(.*?)\s*```', text, re.DOTALL)
+        if match:
+            return match.group(2).strip()
+    
+    return text
 
 
 def detect_language(query: str) -> str:
@@ -222,57 +259,78 @@ Write the guide in English only."""
         raise Exception(f"Structurer error: {str(e)}")
 
 
-def visualizer(data: Dict[str, Any]) -> str:
-    destination = data.get('destination', '목적지')
-    activities = data.get('activities', [])
+async def visualizer(full_content: str, json_data: Dict[str, Any]) -> str:
+    """Gemma 4 기반 AI 에이전트: 여행 계획을 분석하여 Mermaid 시각화 생성"""
+    
+    destination = json_data.get('destination', '목적지')
+    duration = json_data.get('duration', '기간 미상')
+    people = json_data.get('people', '1')
+    
+    # 콘텐츠에서 일정 섹션만 추출 (효율성)
+    schedule_section = full_content
+    if '## 추천 일정' in full_content or '## 일정' in full_content:
+        match = re.search(r'(##\s*추천 일정|##\s*일정).*?(?=##|\Z)', full_content, re.DOTALL)
+        if match:
+            schedule_section = match.group(0)
+    
+    prompt = f"""당신은 여행 계획을 시각적으로 표현하는 AI 에이전트입니다.
 
-    def split_destination(dest_text: str) -> List[str]:
-        if '(' in dest_text and ')' in dest_text:
-            inner = re.search(r'\((.*?)\)', dest_text)
-            if inner:
-                city_candidates = re.split(r'\s*(?:,|&|and|와|과)\s*', inner.group(1))
-            else:
-                city_candidates = re.split(r'\s*(?:,|&|and|와|과)\s*', dest_text)
-        else:
-            city_candidates = re.split(r'\s*(?:,|&|and|와|과)\s*', dest_text)
-        cities = [re.sub(r'^[^\w가-힣]+|[^\w가-힣]+$', '', city).strip() for city in city_candidates]
-        return [city for city in cities if city]
+### 기본 정보
+- 목적지: {destination}
+- 기간: {duration}
+- 인원: {people}명
 
-    cities = split_destination(destination)
-    nodes: List[str] = ['Start["🛬 여행 시작"]']
-    edges: List[str] = []
+### 여행 계획 일정
+{schedule_section[:1800]}{'(내용 축약)' if len(schedule_section) > 1800 else ''}
 
-    if len(cities) > 1:
-        city_nodes = []
-        for idx, city in enumerate(cities):
-            node_id = f'City{idx}'
-            label = city if len(city) <= 18 else city[:15] + '...'
-            nodes.append(f'{node_id}["🏙️ {label} 일정"]')
-            city_nodes.append(node_id)
-        nodes.append('End["🏠 귀가"]')
-        edges.append('Start --> City0')
-        for idx in range(1, len(city_nodes)):
-            edges.append(f'{city_nodes[idx-1]} --> {city_nodes[idx]}')
-        edges.append(f'{city_nodes[-1]} --> End')
-    else:
-        nodes.append(f'Arrive["✈️ {destination} 도착"]')
-        edges.append('Start --> Arrive')
-        for i, activity in enumerate(activities[:5], 1):
-            node_id = f'Activity{i}'
-            activity_short = activity[:15] + '...' if len(activity) > 15 else activity
-            nodes.append(f'{node_id}["{i}. {activity_short}"]')
-            if i == 1:
-                edges.append(f'Arrive --> {node_id}')
-            else:
-                edges.append(f'Activity{i-1} --> {node_id}')
-        nodes.append('End["🏠 귀가"]')
-        if activities:
-            edges.append(f'Activity{min(len(activities), 5)} --> End')
-        else:
-            edges.append('Arrive --> End')
+### 요구사항
+위 여행 계획을 기반으로 Mermaid graph TD로 실제 여행 일정을 표현하세요.
 
-    mermaid_code = 'graph TD\n    ' + '\n    '.join(nodes) + '\n    ' + '\n    '.join(edges)
-    return mermaid_code
+**구성 규칙:**
+1. 날짜별 subgraph (예: subgraph Day1["📅 Day 1: 도착"])
+2. 노드: 구체적 활동명 + 이모지 (예: "✈️ 공항 도착", "🍽️ 아침 식사", "💤 호텔 휴식")
+3. 이모지: ✈️비행, 🚗차량, 🚕택시 / 🍽️식사, 💤수면, 💆마사지, 🏛️관광, 🛍️쇼핑, 📸사진
+4. 간단명료한 연결선
+
+**중요:** 순수 Mermaid 코드만 출력. 마크다운 포맷팅 없음.
+
+예시:
+graph TD
+    subgraph Day1["📅 Day 1"]
+        A["✈️ 공항 도착"]
+        B["🚕 호텔 이동"]
+    end
+    A --> B"""
+    
+    try:
+        response = await asyncio.to_thread(
+            gemma_model.generate_content,
+            prompt,
+            generation_config=genai.types.GenerationConfig(
+                temperature=0.2,
+                max_output_tokens=1500,
+            ),
+            request_options={"timeout": 120}
+        )
+        
+        result_text = get_response_text(response)
+        if not result_text:
+            raise Exception("Visualizer 응답이 비어있습니다")
+        
+        mermaid_code = extract_code_block(result_text, 'mermaid')
+        if not mermaid_code:
+            mermaid_code = extract_code_block(result_text)
+        
+        if not mermaid_code.strip().startswith('graph'):
+            mermaid_code = f"""graph TD
+    Start["🛬 {destination} 여행"]
+    Activity["📅 {duration}"]
+    End["🏠 귀가"]
+    Start --> Activity --> End"""
+        
+        return mermaid_code.strip()
+    except Exception as e:
+        raise Exception(f"Visualizer error: {str(e)}")
 
 
 @app.post("/create_plan")
@@ -348,31 +406,21 @@ async def plan_trip(trip_query: TripQuery):
         # 2. 언어 감지
         language = detect_language(trip_query.query)
 
-        # 3. 병렬 처리: structurer와 visualizer 동시에 실행
-        async def run_structurer():
-            try:
-                return await asyncio.to_thread(structurer, json_data, language)
-            except Exception as e:
-                return f"Error in structurer: {str(e)}"
+        # 3. Structurer 호출 (먼저 완료)
+        content_task = await asyncio.to_thread(structurer, json_data, language)
 
-        async def run_visualizer():
-            try:
-                return await asyncio.to_thread(visualizer, json_data)
-            except Exception as e:
-                return f"Error in visualizer: {str(e)}"
+        # 4. Visualizer 호출 (structurer 결과 + json_data 활용)
+        mermaid_task = await visualizer(content_task, json_data)
 
-        content_task, mermaid_task = await asyncio.gather(run_structurer(), run_visualizer())
-
-        # 4. 결과 조합
+        # 5. 결과 조합
         final_content = f"{content_task}\n\n## 이동 경로\n\n```mermaid\n{mermaid_task}\n```\n"
 
-        # 5. 파일 저장 (충돌 방지 위해 임시 파일 사용)
+        # 6. 파일 저장 (충돌 방지 위해 임시 파일 사용)
         import uuid
         temp_filename = f"output_travel_{uuid.uuid4().hex}.md"
         def write_file():
             with open(temp_filename, "w", encoding="utf-8") as f:
                 f.write(final_content)
-            # 기존 파일 교체
             import shutil
             shutil.move(temp_filename, "output_travel.md")
         await asyncio.to_thread(write_file)

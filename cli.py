@@ -8,6 +8,7 @@ sys.path.insert(0, '/workspaces/thx_air')
 
 from main import planner, structurer, visualizer, detect_language
 import json
+import asyncio
 
 def main():
     print("\n" + "="*60)
@@ -51,9 +52,9 @@ def main():
         markdown_content = structurer(json_data, language)
         print("✅ 가이드 생성 완료\n")
         
-        # 3단계: Visualizer
-        print("[3/3] 🗺️ 이동 경로 생성 중...")
-        mermaid_code = visualizer(json_data)
+        # 3단계: Visualizer (AI 에이전트 기반)
+        print("[3/3] 🗺️ AI 기반 이동 경로 생성 중...")
+        mermaid_code = asyncio.run(visualizer(markdown_content, json_data))
         print("✅ 경로 생성 완료\n")
         
         # 최종 파일 저장
