@@ -132,6 +132,83 @@ def generate_embedding(text: str) -> List[float]:
     return embedding_model.encode(text).tolist()
 
 
+def save_to_rag_history(plan_data: Dict[str, Any], full_content: str, mermaid_code: str) -> None:
+    """로컬 RAG 히스토리에 저장 (travel_history.json)"""
+    try:
+        history_file = "travel_history.json"
+        
+        # 기존 히스토리 로드
+        if os.path.exists(history_file):
+            with open(history_file, "r", encoding="utf-8") as f:
+                history = json.load(f)
+        else:
+            history = []
+        
+        # 새 항목 추가
+        new_entry = {
+            "id": len(history) + 1,
+            "timestamp": str(__import__('datetime').datetime.now()),
+            "destination": plan_data.get('destination', ''),
+            "duration": plan_data.get('duration', ''),
+            "preferences": plan_data.get('preferences', ''),
+            "budget": plan_data.get('budget', ''),
+            "people": plan_data.get('people', 1),
+            "tags": plan_data.get('tags', []),
+            "embedding": generate_embedding(f"{plan_data.get('destination', '')} {plan_data.get('preferences', '')}"),
+            "content_length": len(full_content),
+            "has_mermaid": bool(mermaid_code)
+        }
+        
+        history.append(new_entry)
+        
+        # 최근 50개만 유지 (메모리 효율)
+        if len(history) > 50:
+            history = history[-50:]
+        
+        with open(history_file, "w", encoding="utf-8") as f:
+            json.dump(history, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"RAG 저장 오류: {e}")
+
+
+def find_similar_trips(query: str, k: int = 3) -> List[Dict]:
+    """RAG 히스토리에서 유사 여행 검색"""
+    try:
+        history_file = "travel_history.json"
+        if not os.path.exists(history_file):
+            return []
+        
+        with open(history_file, "r", encoding="utf-8") as f:
+            history = json.load(f)
+        
+        if not history:
+            return []
+        
+        # 쿼리 임베딩
+        query_embedding = generate_embedding(query)
+        
+        # 코사인 유사도 계산 (간단한 구현)
+        from sklearn.metrics.pairwise import cosine_similarity
+        import numpy as np
+        
+        similarities = []
+        for entry in history:
+            entry_embedding = entry.get('embedding', [])
+            if entry_embedding:
+                sim = cosine_similarity(
+                    [query_embedding],
+                    [entry_embedding]
+                )[0][0]
+                similarities.append((sim, entry))
+        
+        # 상위 k개 반환
+        top_k = sorted(similarities, key=lambda x: x[0], reverse=True)[:k]
+        return [entry for _, entry in top_k]
+    except Exception as e:
+        print(f"RAG 검색 오류: {e}")
+        return []
+
+
 def process_pipeline(query: str) -> Dict[str, Any]:
     raw_data = planner(query)
     normalized_data = normalize_data(raw_data)
@@ -147,9 +224,19 @@ def process_pipeline(query: str) -> Dict[str, Any]:
 
 
 def planner(query: str) -> dict:
+    """사용자 쿼리를 분석하여 여행 정보 추출 (RAG 참고)"""
+    
+    # RAG 검색: 유사한 과거 여행 조회
+    similar_trips = find_similar_trips(query, k=2)
+    rag_context = ""
+    if similar_trips:
+        rag_context = "\n\n### 참고: 과거 유사한 여행 사례\n"
+        for trip in similar_trips:
+            rag_context += f"- {trip['destination']} ({trip['duration']}): {trip.get('preferences', '')}\n"
+    
     prompt = f"""당신은 한국 사용자의 여행 계획을 파악하는 AI입니다. 다음 사용자의 말을 분석하여 꼭 필요한 정보를 JSON으로만 추출하세요.
 
-사용자의 말: '{query}'
+사용자의 말: '{query}'{rag_context}
 
 반드시 다음 JSON 형식으로만 답변하세요. 다른 설명은 절대 하지 말기:
 {{"destination": "여행지명", "duration": "기간", "preferences": "취향", "activities": ["활동1","활동2","활동3"], "tags": ["태그1","태그2"]}}
@@ -335,6 +422,10 @@ graph TD
 
 @app.post("/create_plan")
 async def create_plan(request: CreatePlanRequest):
+    """여행 계획 생성 + 로컬 RAG 저장 (DB 없는 버전)"""
+    if not supabase:
+        raise HTTPException(status_code=503, detail="DB 기능이 현재 비활성화되어 있습니다. /plan_trip 엔드포인트를 사용해주세요.")
+    
     try:
         pipeline_result = await asyncio.to_thread(process_pipeline, request.query)
         data_to_insert = {
@@ -343,7 +434,7 @@ async def create_plan(request: CreatePlanRequest):
             'metadata': {
                 **pipeline_result['normalized_data'],
                 'lang_code': pipeline_result['language'],
-                'content': None  # 나중에 생성된 콘텐츠 저장 가능
+                'content': None
             },
             'embedding': pipeline_result['embedding']
         }
@@ -359,6 +450,10 @@ async def create_plan(request: CreatePlanRequest):
 
 @app.put("/update_plan")
 async def update_plan(request: UpdatePlanRequest):
+    """여행 계획 업데이트 (DB 필수)"""
+    if not supabase:
+        raise HTTPException(status_code=503, detail="DB 기능이 현재 비활성화되어 있습니다.")
+    
     try:
         existing = supabase.table('travel_plans').select('*').eq('id', request.plan_id).eq('user_id', request.user_id).execute()
         if not existing.data:
@@ -390,56 +485,79 @@ async def update_plan(request: UpdatePlanRequest):
 
 @app.post("/plan_trip")
 async def plan_trip(trip_query: TripQuery):
+    """여행 계획 생성 (RAG + 스트리밍)"""
     if not trip_query.query or not trip_query.query.strip():
         raise HTTPException(status_code=400, detail="query 값은 비어 있을 수 없습니다")
     if trip_query.people is not None and trip_query.people <= 0:
         raise HTTPException(status_code=400, detail="people 값은 1 이상이어야 합니다")
 
-    try:
-        # 1. Planner 호출
-        json_data = await asyncio.to_thread(planner, trip_query.query)
-        if trip_query.budget:
-            json_data['budget'] = trip_query.budget
-        if trip_query.people is not None:
-            json_data['people'] = trip_query.people
+    async def generate_plan_stream():
+        """스트리밍 생성 제너레이터"""
+        try:
+            # 1. Planner 호출
+            yield f"data: {json.dumps({'stage': 'planner', 'message': '여행 정보 분석 중...'})}\n\n"
+            json_data = await asyncio.to_thread(planner, trip_query.query)
+            if trip_query.budget:
+                json_data['budget'] = trip_query.budget
+            if trip_query.people is not None:
+                json_data['people'] = trip_query.people
+            yield f"data: {json.dumps({'stage': 'planner_done', 'destination': json_data.get('destination'), 'duration': json_data.get('duration')})}\n\n"
 
-        # 2. 언어 감지
-        language = detect_language(trip_query.query)
+            # 2. 언어 감지
+            yield f"data: {json.dumps({'stage': 'lang_detect', 'message': '언어 감지 중...'})}\n\n"
+            language = detect_language(trip_query.query)
+            yield f"data: {json.dumps({'stage': 'lang_detected', 'language': language})}\n\n"
 
-        # 3. Structurer 호출 (먼저 완료)
-        content_task = await asyncio.to_thread(structurer, json_data, language)
+            # 3. Structurer 호출
+            yield f"data: {json.dumps({'stage': 'structurer', 'message': '여행 가이드 생성 중...'})}\n\n"
+            content_task = await asyncio.to_thread(structurer, json_data, language)
+            yield f"data: {json.dumps({'stage': 'structurer_done', 'content_length': len(content_task)})}\n\n"
 
-        # 4. Visualizer 호출 (structurer 결과 + json_data 활용)
-        mermaid_task = await visualizer(content_task, json_data)
+            # 4. Visualizer 호출
+            yield f"data: {json.dumps({'stage': 'visualizer', 'message': 'AI 기반 이동 경로 생성 중...'})}\n\n"
+            mermaid_task = await visualizer(content_task, json_data)
+            yield f"data: {json.dumps({'stage': 'visualizer_done', 'has_mermaid': bool(mermaid_task)})}\n\n"
 
-        # 5. 결과 조합
-        final_content = f"{content_task}\n\n## 이동 경로\n\n```mermaid\n{mermaid_task}\n```\n"
+            # 5. 결과 조합
+            final_content = f"{content_task}\n\n## 이동 경로\n\n```mermaid\n{mermaid_task}\n```\n"
 
-        # 6. 파일 저장 (충돌 방지 위해 임시 파일 사용)
-        import uuid
-        temp_filename = f"output_travel_{uuid.uuid4().hex}.md"
-        def write_file():
-            with open(temp_filename, "w", encoding="utf-8") as f:
-                f.write(final_content)
-            import shutil
-            shutil.move(temp_filename, "output_travel.md")
-        await asyncio.to_thread(write_file)
+            # 6. 파일 저장
+            yield f"data: {json.dumps({'stage': 'saving', 'message': '결과 저장 중...'})}\n\n"
+            import uuid
+            temp_filename = f"output_travel_{uuid.uuid4().hex}.md"
+            def write_file():
+                with open(temp_filename, "w", encoding="utf-8") as f:
+                    f.write(final_content)
+                import shutil
+                shutil.move(temp_filename, "output_travel.md")
+            await asyncio.to_thread(write_file)
 
-        return {
-            "message": "Gemma 4가 여행 계획을 성공적으로 생성했습니다.",
-            "content": final_content,
-            "language": language,
-            "mermaid": mermaid_task
+            # 7. RAG 저장
+            yield f"data: {json.dumps({'stage': 'rag_saving', 'message': 'RAG 히스토리 저장 중...'})}\n\n"
+            await asyncio.to_thread(save_to_rag_history, json_data, final_content, mermaid_task)
+
+            # 8. 최종 결과 전송
+            yield f"data: {json.dumps({'stage': 'complete', 'message': '완료!', 'destination': json_data.get('destination'), 'language': language})}\n\n"
+            yield f"data: [DONE]\n\n"
+
+        except Exception as e:
+            error_msg = str(e)
+            if "504" in error_msg or "Deadline" in error_msg:
+                error_msg = "AI 모델 응답 시간이 초과되었습니다. 잠시 후 다시 시도해주세요."
+            elif "API" in error_msg:
+                error_msg = "Google API 연결에 문제가 있습니다. API 키를 확인해주세요."
+            
+            yield f"data: {json.dumps({'stage': 'error', 'error': error_msg})}\n\n"
+
+    return StreamingResponse(
+        generate_plan_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
         }
-    except Exception as e:
-        error_msg = str(e)
-        if "504" in error_msg or "Deadline" in error_msg:
-            error_msg = "AI 모델 응답 시간이 초과되었습니다. 잠시 후 다시 시도해주세요."
-        elif "API" in error_msg:
-            error_msg = "Google API 연결에 문제가 있습니다. API 키를 확인해주세요."
-        else:
-            error_msg = f"처리 중 오류가 발생했습니다: {error_msg}"
-        raise HTTPException(status_code=500, detail=error_msg)
+    )
 
 
 @app.get("/", response_class=HTMLResponse)
